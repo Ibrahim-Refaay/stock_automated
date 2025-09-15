@@ -1,0 +1,4 @@
+# Basic requirements for Odoo API interaction
+# Add specific dependencies as needed for your ETL implementation
+requests>=2.25.0
+xmlrpc-ssl>=1.0.0
