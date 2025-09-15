@@ -1,0 +1,39 @@
+name: Inventory ETL Workflow
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+
+jobs:
+  inventory-etl:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+        
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GOOGLE_CLOUD_CREDENTIALS }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        
+    - name: Run inventory ETL
+      env:
+        ODOO_URL: ${{ secrets.ODOO_URL }}
+        ODOO_DB: ${{ secrets.ODOO_DB }}
+        ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
+        ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
+      run: python inventory_etl.py
