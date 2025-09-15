@@ -32,8 +32,8 @@ jobs:
         
     - name: Run inventory ETL
       env:
-        ODOO_URL: ${{ secrets.ODOO_URL }}
-        ODOO_DB: ${{ secrets.ODOO_DB }}
-        ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
-        ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
+        ODOO_URL: ${{ vars.ODOO_URL }}
+        ODOO_DB: ${{ vars.ODOO_DB }}
+        ODOO_USERNAME: ${{ vars.ODOO_USERNAME }}
+        ODOO_PASSWORD: ${{ vars.ODOO_PASSWORD }}
       run: python inventory_etl.py
