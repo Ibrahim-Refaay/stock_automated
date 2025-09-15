@@ -20,6 +20,11 @@ jobs:
       with:
         python-version: '3.x'
         
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GOOGLE_CLOUD_CREDENTIALS }}
+        
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
