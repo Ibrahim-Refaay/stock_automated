@@ -1,7 +1,3 @@
-# inventory_etl.py
-# This script fetches the latest inventory snapshot from Odoo and uploads it to BigQuery.
-# Optimized for GitHub Actions with environment variables and automatic authentication.
-
 import os
 import requests
 import pandas as pd
@@ -126,6 +122,7 @@ def ensure_stock_table_exists(client, dataset_id, table_id):
             bigquery.SchemaField("Unit_Cost", "FLOAT"),
             bigquery.SchemaField("Total_Cost", "FLOAT"),
             bigquery.SchemaField("Last_Updated", "TIMESTAMP"),
+            bigquery.SchemaField("Data_Quality_Flag", "STRING"),
         ]
         table = bigquery.Table(table_ref, schema=schema)
         client.create_table(table)
@@ -171,7 +168,7 @@ def main():
         locations = call_odoo(session, uid, "stock.location", "read", [location_ids], {"fields": ["id", "name", "warehouse_id"]})
         location_map = {loc['id']: {
             'name': loc['name'],
-            'warehouse_id': loc['warehouse_id'][0] if isinstance(loc.get('warehouse_id'), list) else None
+            'warehouse_id': loc['warehouse_id'][0] if isinstance(loc.get('warehouse_id'), list) and len(loc.get('warehouse_id', [])) > 0 else None
         } for loc in locations}
         logging.info(f"✅ Got details for {len(location_map)} locations from Odoo.")
 
@@ -187,7 +184,7 @@ def main():
             logging.warning("⚠️ No stock found in any of the specified locations.")
             final_df = pd.DataFrame(columns=["Product_Name", "Barcode", "Branch_Name", "Category",
                                              "Qty_On_Hand", "Reserved_Qty", "Available_Qty",
-                                             "Unit_Cost", "Total_Cost", "Last_Updated"])
+                                             "Unit_Cost", "Total_Cost", "Last_Updated", "Data_Quality_Flag"])
         else:
             logging.info(f"✅ Found {len(stock_quants)} total stock records in specified locations.")
 
@@ -203,6 +200,8 @@ def main():
             logging.info("⚙️ Assembling the final report...")
             report_data = []
             current_timestamp = datetime.utcnow()
+            negative_stock_count = 0
+            missing_branch_count = 0
 
             for quant in stock_quants:
                 if not quant.get('product_id'):
@@ -218,27 +217,40 @@ def main():
                 branch_name = branch_map.get(warehouse_id, 'N/A')
 
                 # Calculate quantities
-                on_hand_qty = quant.get('quantity', 0)
-                reserved_qty = quant.get('reserved_quantity', 0)
+                on_hand_qty = float(quant.get('quantity', 0))
+                reserved_qty = float(quant.get('reserved_quantity', 0))
                 available_qty = on_hand_qty - reserved_qty
-                unit_cost = product_info.get('standard_price', 0)
+                unit_cost = float(product_info.get('standard_price', 0))
                 total_cost = on_hand_qty * unit_cost
+
+                # Track data quality issues
+                quality_flags = []
+                if on_hand_qty < 0:
+                    negative_stock_count += 1
+                    quality_flags.append("NEGATIVE_STOCK")
+                    logging.warning(f"⚠️ Negative stock detected for product {product_id}: {on_hand_qty}")
+
+                if branch_name == 'N/A':
+                    missing_branch_count += 1
+                    quality_flags.append("MISSING_BRANCH")
 
                 report_data.append({
                     'Product_Name': product_info.get('display_name', 'N/A'),
                     'Barcode': product_info.get('barcode', ''),
                     'Branch_Name': branch_name,
                     'Category': product_info.get('categ_id')[1] if isinstance(product_info.get('categ_id'), list) else 'N/A',
-                    'Qty_On_Hand': float(on_hand_qty),
-                    'Reserved_Qty': float(reserved_qty),
-                    'Available_Qty': float(available_qty),
-                    'Unit_Cost': float(unit_cost),
-                    'Total_Cost': float(total_cost),
-                    'Last_Updated': current_timestamp
+                    'Qty_On_Hand': on_hand_qty,
+                    'Reserved_Qty': reserved_qty,
+                    'Available_Qty': available_qty,
+                    'Unit_Cost': unit_cost,
+                    'Total_Cost': total_cost,
+                    'Last_Updated': current_timestamp,
+                    'Data_Quality_Flag': '; '.join(quality_flags) if quality_flags else 'OK'
                 })
 
             final_df = pd.DataFrame(report_data)
             logging.info(f"✅ Assembled report with {len(final_df)} records.")
+            logging.warning(f"⚠️ Data Quality Issues: {negative_stock_count} negative stock, {missing_branch_count} missing branches")
 
         # --- 8. Upload to BigQuery ---
         logging.info(f"📤 Uploading to BigQuery table: {DATASET_ID}.{STOCK_TABLE}")
