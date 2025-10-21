@@ -24,7 +24,7 @@ STOCK_TABLE = "stock_data"
 
 # --- File Configuration ---
 # Get the directory where this script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(_file_))
 LOCATIONS_FILE = os.path.join(SCRIPT_DIR, "locations-id.xlsx")
 BRANCHES_FILE = os.path.join(SCRIPT_DIR, "Branches-id.xlsx")
 
@@ -73,6 +73,8 @@ def get_odoo_session():
     except Exception as e:
         logging.error(f"❌ Odoo connection error: {e}")
         return None, None
+
+def load_location_and_branch_files():
     """Load Excel files for locations and branches mapping."""
     try:
         # Try to read Excel files
@@ -87,7 +89,7 @@ def get_odoo_session():
             logging.info(f"✅ Loaded {len(target_location_ids)} locations and {len(branch_map)} branches from Excel files.")
             return target_location_ids, branch_map, True
         else:
-            logging.warning(f"⚠️ Excel files not found at:")
+            logging.warning(f"⚠ Excel files not found at:")
             logging.warning(f"   - {LOCATIONS_FILE}")
             logging.warning(f"   - {BRANCHES_FILE}")
             logging.info("📋 Will fetch location and branch data from Odoo directly.")
@@ -126,41 +128,6 @@ def get_locations_and_branches_from_odoo(session, uid):
     except Exception as e:
         logging.error(f"❌ Error fetching locations/branches from Odoo: {e}")
         return [], {}
-    """Authenticates with Odoo and returns a session object and user ID."""
-    # Check if credentials were loaded correctly
-    if not all([ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD]):
-        logging.error("❌ Odoo environment variables not set correctly.")
-        logging.error("Required: ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD")
-        return None, None
-
-    session = requests.Session()
-    auth_url = f"{ODOO_URL}/web/session/authenticate"
-    payload = {
-        "jsonrpc": "2.0", 
-        "method": "call", 
-        "params": {
-            "db": ODOO_DB, 
-            "login": ODOO_USERNAME, 
-            "password": ODOO_PASSWORD
-        }
-    }
-    
-    try:
-        logging.info("Authenticating to Odoo...")
-        response = session.post(auth_url, json=payload, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        uid = result.get('result', {}).get('uid')
-        
-        if uid:
-            logging.info(f"✅ Odoo authentication successful. UID: {uid}")
-            return session, uid
-        else:
-            logging.error(f"❌ Odoo login failed: {result.get('error', 'Unknown error')}")
-            return None, None
-    except Exception as e:
-        logging.error(f"❌ Odoo connection error: {e}")
-        return None, None
 
 def call_odoo(session, uid, model, method, args=[], kwargs={}, timeout=600):
     """Makes a JSON-RPC call to Odoo with proper error handling."""
@@ -210,7 +177,6 @@ def ensure_stock_table_exists(client, dataset_id, table_id):
         logging.info(f"✅ Table {table_id} already exists.")
     except NotFound:
         logging.info(f"🔧 Table {table_id} not found, creating it...")
-        # --- MODIFICATION: Use BQ-friendly column names (no spaces) ---
         schema = [
             bigquery.SchemaField("Product_Name", "STRING"),
             bigquery.SchemaField("Barcode", "STRING"),
@@ -240,33 +206,37 @@ def main():
     logging.warning("⏳ This is a large data operation and may take several minutes to complete.")
 
     try:
-        # --- 2. Get branch mapping ---
-        logging.info("📋 Fetching branch information...")
-        branches = call_odoo(session, uid, "stock.warehouse", "search_read", [], {"fields": ["id", "name"]})
-        branch_map = {b['id']: b['name'] for b in branches} if branches else {}
-        logging.info(f"✅ Found {len(branch_map)} branches.")
+        # --- 2. Load locations and branches from Excel files (or fetch from Odoo as fallback) ---
+        target_location_ids, branch_map, files_loaded = load_location_and_branch_files()
+        
+        if not files_loaded:
+            # Fallback: fetch from Odoo
+            target_location_ids, branch_map = get_locations_and_branches_from_odoo(session, uid)
+            
+        if not target_location_ids:
+            logging.error("❌ No locations found. Cannot proceed.")
+            exit(1)
 
-        # --- 3. Get location IDs for internal locations ---
-        logging.info("📍 Fetching internal stock locations...")
+        # --- 3. Get location details from Odoo ---
+        logging.info("📍 Fetching location details from Odoo...")
         locations = call_odoo(session, uid, "stock.location", "search_read", 
-                            [[('usage', '=', 'internal')]], 
+                            [[('id', 'in', target_location_ids)]], 
                             {"fields": ["id", "name", "warehouse_id"]})
         
         if not locations:
-            logging.error("❌ No internal locations found.")
+            logging.error("❌ No location details found.")
             exit(1)
             
-        location_ids = [loc['id'] for loc in locations]
         location_map = {loc['id']: {
             'name': loc['name'], 
             'warehouse_id': loc['warehouse_id'][0] if isinstance(loc.get('warehouse_id'), list) else None
         } for loc in locations}
         
-        logging.info(f"✅ Found {len(location_ids)} internal locations.")
+        logging.info(f"✅ Working with {len(target_location_ids)} locations.")
 
-        # --- 4. Fetch Stock Quants ---
-        logging.info("📦 Fetching current stock levels for all internal locations...")
-        quant_domain = [('location_id', 'in', location_ids)]
+        # --- 4. Fetch Stock Quants (ONLY for the specified locations) ---
+        logging.info(f"📦 Fetching current stock levels for {len(target_location_ids)} specified locations...")
+        quant_domain = [('location_id', 'in', target_location_ids)]
         quant_fields = ['product_id', 'location_id', 'quantity', 'reserved_quantity']
         
         stock_quants = call_odoo(session, uid, "stock.quant", "search_read", 
@@ -274,13 +244,13 @@ def main():
                                 {"fields": quant_fields, "limit": 500000})
 
         if not stock_quants:
-            logging.warning("⚠️ No stock found in any of the specified locations.")
+            logging.warning("⚠ No stock found in any of the specified locations.")
             # Create empty DataFrame for consistency
             final_df = pd.DataFrame(columns=["Product_Name", "Barcode", "Branch_Name", "Category", 
                                            "Qty_On_Hand", "Reserved_Qty", "Available_Qty", 
                                            "Unit_Cost", "Total_Cost", "Last_Updated"])
         else:
-            logging.info(f"✅ Found {len(stock_quants)} total stock records across all locations.")
+            logging.info(f"✅ Found {len(stock_quants)} total stock records across specified locations.")
             
             # --- 5. Get unique product IDs and fetch product details ---
             product_ids = list(set([q['product_id'][0] for q in stock_quants if q.get('product_id')]))
@@ -291,7 +261,7 @@ def main():
             product_map = {p['id']: p for p in product_data}
 
             # --- 6. Assemble the Final Report ---
-            logging.info("⚙️ Assembling the final report...")
+            logging.info("⚙ Assembling the final report...")
             report_data = []
             current_timestamp = datetime.utcnow()
             
@@ -334,15 +304,12 @@ def main():
         # --- 7. Upload to BigQuery ---
         logging.info(f"📤 Uploading to BigQuery table: {DATASET_ID}.{STOCK_TABLE}")
         
-        # --- MODIFICATION: Automated authentication ---
-        # The client will automatically find credentials from the environment.
         bq_client = bigquery.Client(project=PROJECT_ID)
         
         ensure_stock_table_exists(bq_client, DATASET_ID, STOCK_TABLE)
         
         # Upload data
         if not final_df.empty:
-            # `to_gbq` will also find credentials automatically from the environment.
             final_df.to_gbq(
                 destination_table=f"{DATASET_ID}.{STOCK_TABLE}",
                 project_id=PROJECT_ID,
@@ -350,14 +317,13 @@ def main():
             )
             logging.info(f"✅ Successfully uploaded {len(final_df)} records to BigQuery table: {DATASET_ID}.{STOCK_TABLE}")
         else:
-            logging.warning("⚠️ No data to upload - creating empty table structure.")
+            logging.warning("⚠ No data to upload - creating empty table structure.")
             
     except Exception as e:
         logging.error(f"❌ Critical error in main pipeline: {e}")
-        # Raise the exception to make the GitHub Action fail
         raise
     
     logging.info("=== Stock Report Completed Successfully ===")
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     main()
