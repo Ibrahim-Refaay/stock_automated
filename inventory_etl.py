@@ -6,7 +6,7 @@ import os
 import requests
 import pandas as pd
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 
@@ -178,7 +178,7 @@ def main():
             # --- 5. Assemble the Final Report ---
             logging.info("⚙️ Assembling the final report...")
             report_data = []
-            current_timestamp = datetime.utcnow()
+            current_timestamp = datetime.now(timezone.utc)
             
             for quant in stock_quants:
                 if not quant.get('product_id'): continue
@@ -197,10 +197,14 @@ def main():
                 available_qty = on_hand_qty - reserved_qty
                 unit_cost = product_info.get('standard_price', 0)
                 total_cost = on_hand_qty * unit_cost
+                
+                # FIX: Ensure barcode is a string to prevent type errors
+                barcode_val = product_info.get('barcode')
+                barcode_str = str(barcode_val) if barcode_val else ''
 
                 report_data.append({
                     'Product_Name': product_info.get('display_name', 'N/A'),
-                    'Barcode': product_info.get('barcode', ''),
+                    'Barcode': barcode_str,
                     'Branch_ID': warehouse_id,
                     'Branch_Name': branch_name,
                     'Location_ID': location_id,
